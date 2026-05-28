@@ -1,11 +1,55 @@
 require("dotenv").config();
 const express = require("express");
 const usb = require("usb");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const Jimp = require("jimp");
 const {
   ThermalPrinter,
   PrinterTypes,
   CharacterSet,
 } = require("node-thermal-printer");
+
+const LOGOS_DIR = path.join(__dirname, "logos");
+// Standard 80mm ESC/POS paper width in dots at 203 DPI
+const PAPER_WIDTH = 576;
+const HEADER_HEIGHT = 96;
+
+function getRandomLogoPath() {
+  const files = fs.readdirSync(LOGOS_DIR).filter((f) => /\.(jpe?g|png)$/i.test(f));
+  if (files.length === 0) return null;
+  return path.join(LOGOS_DIR, files[Math.floor(Math.random() * files.length)]);
+}
+
+async function buildHeaderImage(logoPath) {
+  const logo = await Jimp.read(logoPath);
+  logo.resize(Jimp.AUTO, HEADER_HEIGHT);
+  const logoWidth = logo.getWidth();
+
+  // White base canvas
+  const header = new Jimp(PAPER_WIDTH, HEADER_HEIGHT, 0xffffffff);
+  header.composite(logo, 0, 0);
+
+  // Black panel for "TODO" label, starting right after the logo with a small gap
+  const panelX = logoWidth + 8;
+  const panelWidth = PAPER_WIDTH - panelX;
+  const panel = new Jimp(panelWidth, HEADER_HEIGHT, 0x000000ff);
+  header.composite(panel, panelX, 0);
+
+  // Print " TODO " in white centered inside the black panel
+  const font = await Jimp.loadFont(Jimp.FONT_SANS_64_WHITE);
+  const label = " TODO ";
+  const textW = Jimp.measureText(font, label);
+  const textH = Jimp.measureTextHeight(font, label, panelWidth);
+  const textX = panelX + Math.max(0, Math.floor((panelWidth - textW) / 2));
+  const textY = Math.max(0, Math.floor((HEADER_HEIGHT - textH) / 2));
+  header.print(font, textX, textY, label);
+
+  const tmpPath = path.join(os.tmpdir(), `receipt-header-${Date.now()}.png`);
+  await header.writeAsync(tmpPath);
+  return tmpPath;
+}
 
 // Printer configuration
 const PRINTER_TYPE = process.env.PRINTER_TYPE || "EPSON";
@@ -90,15 +134,24 @@ class TodoPrinter {
       // Clear buffer
       this.printer.clear();
 
-      // Top header with emphasis
-      this.printer.alignCenter();
-      this.printer.setTextSize(2, 2);
-      this.printer.bold(true);
-      this.printer.invert(true);
-      this.printer.println(" TODO ");
-      this.printer.invert(false);
-      this.printer.bold(false);
-      this.printer.setTextNormal();
+      // Header: logo on the left, "TODO" label on the right, composited into one image
+      const logoPath = getRandomLogoPath();
+      if (logoPath) {
+        const headerImagePath = await buildHeaderImage(logoPath);
+        this.printer.alignLeft();
+        await this.printer.printImage(headerImagePath);
+        fs.unlinkSync(headerImagePath);
+      } else {
+        // Fallback when no logos are available
+        this.printer.alignCenter();
+        this.printer.setTextSize(2, 2);
+        this.printer.bold(true);
+        this.printer.invert(true);
+        this.printer.println(" TODO ");
+        this.printer.invert(false);
+        this.printer.bold(false);
+        this.printer.setTextNormal();
+      }
 
       // Task title section
       this.printer.alignLeft();

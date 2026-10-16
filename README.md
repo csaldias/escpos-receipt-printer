@@ -5,6 +5,8 @@ Node.js application for printing TODO tickets on thermal receipt printers.
 ## Features
 
 - 🎫 Print todo tickets with title, assignee, and description
+- 🔔 Token-protected message endpoint for automated clients (AI agents, hooks, scripts)
+- 🖼️ Random logo from `logos/` printed in the ticket header
 - 🖨️ Support for USB and network thermal printers
 - 📋 RESTful API endpoints
 - 🐳 Docker support (recommended for network printers)
@@ -43,6 +45,12 @@ Node.js application for printing TODO tickets on thermal receipt printers.
    docker-compose up -d
    ```
 
+   This builds the image locally. A prebuilt multi-arch image (amd64/arm64) is also published to GitHub Packages on every push to `main` and every `v*` tag:
+
+   ```bash
+   docker pull ghcr.io/csaldias/escpos-receipt-printer:latest
+   ```
+
 4. **Test the API:**
    ```bash
    curl -X POST http://localhost:3000/print-todo \
@@ -74,11 +82,16 @@ Node.js application for printing TODO tickets on thermal receipt printers.
    npm run todo-server
    ```
 
+4. **Run the tests** (they use a fake printer, nothing is printed):
+   ```bash
+   npm test
+   ```
+
 ## API Endpoints
 
 ### POST /print-todo
 
-Print a TODO ticket.
+Print a TODO ticket. Requests must be JSON (`Content-Type: application/json`). Titles are limited to 120 characters, the other fields to 800.
 
 **Request Body:**
 
@@ -102,6 +115,35 @@ Print a TODO ticket.
     "description": "Users cannot login...",
     "timestamp": "2024-01-15T10:30:00.000Z"
   }
+}
+```
+
+### POST /print-message
+
+Print a short message for automated clients (AI agents, hooks, scripts). The header shows `NOTE`, `ALERT` or `DONE` instead of `TODO`.
+
+Requires `Authorization: Bearer <PRINT_API_TOKEN>`. Same length limits as `/print-todo`, and the server prints at most `MESSAGE_RATE_LIMIT` messages per hour (default 10).
+
+```bash
+curl -X POST http://localhost:3000/print-message \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $PRINT_API_TOKEN" \
+  -d '{
+    "kind": "alert",
+    "title": "Need your input",
+    "body": "The migration is waiting for you to pick a backup location.",
+    "source": "Claude Code"
+  }'
+```
+
+**Request Body:**
+
+```json
+{
+  "kind": "note", // Optional: note (default), alert or done
+  "title": "Build finished", // Required: headline
+  "body": "All 214 tests passed.", // Optional: message text
+  "source": "Claude Code" // Optional: printed as FROM
 }
 ```
 
@@ -130,6 +172,15 @@ Configure your printer in the `.env` file. Choose either USB or Network mode:
 
 - `PRINTER_NETWORK_IP`: Network printer IP address
 - `PRINTER_NETWORK_PORT`: Network printer port (default: 9100)
+
+#### Logos
+
+Each ticket header shows a random `.png`/`.jpg` from the `logos/` directory, scaled to 96px high. Add or remove files there to change the selection; with no logos, a plain text header is printed instead.
+
+#### Message API
+
+- `PRINT_API_TOKEN`: Bearer token required by `POST /print-message` (the endpoint is disabled when unset). Generate one with `openssl rand -hex 32`
+- `MESSAGE_RATE_LIMIT`: Maximum messages printed per hour (default: 10)
 
 ## Examples
 

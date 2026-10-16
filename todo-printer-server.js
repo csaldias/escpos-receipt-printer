@@ -2,8 +2,8 @@ require("dotenv").config();
 const express = require("express");
 const usb = require("usb");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
+const crypto = require("crypto");
 const Jimp = require("jimp");
 const {
   ThermalPrinter,
@@ -22,7 +22,7 @@ function getRandomLogoPath() {
   return path.join(LOGOS_DIR, files[Math.floor(Math.random() * files.length)]);
 }
 
-async function buildHeaderImage(logoPath) {
+async function buildHeaderImage(logoPath, labelText) {
   const logo = await Jimp.read(logoPath);
   logo.resize(Jimp.AUTO, HEADER_HEIGHT);
   const logoWidth = logo.getWidth();
@@ -37,18 +37,16 @@ async function buildHeaderImage(logoPath) {
   const panel = new Jimp(panelWidth, HEADER_HEIGHT, 0x000000ff);
   header.composite(panel, panelX, 0);
 
-  // Print " TODO " in white centered inside the black panel
+  // Print the label in white centered inside the black panel
   const font = await Jimp.loadFont(Jimp.FONT_SANS_64_WHITE);
-  const label = " TODO ";
+  const label = ` ${labelText} `;
   const textW = Jimp.measureText(font, label);
   const textH = Jimp.measureTextHeight(font, label, panelWidth);
   const textX = panelX + Math.max(0, Math.floor((panelWidth - textW) / 2));
   const textY = Math.max(0, Math.floor((HEADER_HEIGHT - textH) / 2));
   header.print(font, textX, textY, label);
 
-  const tmpPath = path.join(os.tmpdir(), `receipt-header-${Date.now()}.png`);
-  await header.writeAsync(tmpPath);
-  return tmpPath;
+  return header.getBufferAsync(Jimp.MIME_PNG);
 }
 
 // Printer configuration
@@ -125,7 +123,12 @@ class TodoPrinter {
     }
   }
 
-  async printTodoTicket(title, assignee = null, description = null) {
+  async printTicket(
+    title,
+    assignee = null,
+    description = null,
+    { label = "TODO", ownerLabel = "OWNER" } = {}
+  ) {
     if (!this.printer) {
       throw new Error("Printer not initialized");
     }
@@ -134,20 +137,19 @@ class TodoPrinter {
       // Clear buffer
       this.printer.clear();
 
-      // Header: logo on the left, "TODO" label on the right, composited into one image
+      // Header: logo on the left, label on the right, composited into one image
       const logoPath = getRandomLogoPath();
       if (logoPath) {
-        const headerImagePath = await buildHeaderImage(logoPath);
+        const headerImage = await buildHeaderImage(logoPath, label);
         this.printer.alignLeft();
-        await this.printer.printImage(headerImagePath);
-        fs.unlinkSync(headerImagePath);
+        await this.printer.printImageBuffer(headerImage);
       } else {
         // Fallback when no logos are available
         this.printer.alignCenter();
         this.printer.setTextSize(2, 2);
         this.printer.bold(true);
         this.printer.invert(true);
-        this.printer.println(" TODO ");
+        this.printer.println(` ${label} `);
         this.printer.invert(false);
         this.printer.bold(false);
         this.printer.setTextNormal();
@@ -172,7 +174,7 @@ class TodoPrinter {
       if (assignee && assignee.trim()) {
         this.printer.setTextSize(1, 1);
         this.printer.bold(true);
-        this.printer.print("OWNER: ");
+        this.printer.print(`${ownerLabel}: `);
         this.printer.bold(false);
         this.printer.underline(true);
         this.printer.println(assignee.trim());
@@ -197,22 +199,15 @@ class TodoPrinter {
       // Timestamp
       this.printer.alignCenter();
       this.printer.setTextSize(1, 1);
-      const now = new Date();
+      // Round to nearest hour (9:31 -> 10a, 9:29 -> 9a, 23:45 -> 12a next day)
+      const rounded = new Date(Date.now() + 30 * 60 * 1000);
+      const hour = rounded.getHours();
+      const hour12 = hour % 12 || 12;
+      const ampm = hour < 12 ? "a" : "p";
 
-      // Round to nearest hour (9:31 -> 10a, 9:29 -> 9a)
-      const roundedHour =
-        now.getMinutes() >= 30 ? now.getHours() + 1 : now.getHours();
-      const hour12 =
-        roundedHour === 0
-          ? 12
-          : roundedHour > 12
-          ? roundedHour - 12
-          : roundedHour;
-      const ampm = roundedHour >= 12 && roundedHour < 24 ? "p" : "a";
-
-      const timestamp = `${hour12}${ampm} ${now.toLocaleDateString("en-US", {
+      const timestamp = `${hour12}${ampm} ${rounded.toLocaleDateString("en-US", {
         weekday: "short",
-      })} - ${now.toLocaleDateString("en-US", {
+      })} - ${rounded.toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
       })}`;
@@ -232,32 +227,28 @@ class TodoPrinter {
     }
   }
 
-  // Simple word-wrap function
+  // Simple word-wrap function; keeps the line breaks already in the text
   wrapText(text, width) {
-    const words = text.split(" ");
     const lines = [];
-    let currentLine = "";
 
-    for (const word of words) {
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
+    for (const paragraph of text.split(/\r?\n/)) {
+      let currentLine = "";
 
-      if (testLine.length <= width) {
-        currentLine = testLine;
-      } else {
-        if (currentLine) lines.push(currentLine);
-        currentLine = word;
+      for (const word of paragraph.split(" ")) {
+        const testLine = currentLine ? `${currentLine} ${word}` : word;
+
+        if (testLine.length <= width) {
+          currentLine = testLine;
+        } else {
+          if (currentLine) lines.push(currentLine);
+          currentLine = word;
+        }
       }
+
+      lines.push(currentLine);
     }
 
-    if (currentLine) lines.push(currentLine);
     return lines.join("\n");
-  }
-
-  disconnect() {
-    // Cleanup method for graceful shutdown
-    if (this.printer) {
-      console.log("Printer disconnected");
-    }
   }
 }
 
@@ -267,38 +258,83 @@ const port = 3000;
 
 // Middleware
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 // Initialize printer
 const printer = new TodoPrinter();
 let printerConnected = false;
 
+// Printer work shares the printer's command buffer, so it runs one job at a time
+let printQueue = Promise.resolve();
+function inQueue(work) {
+  const job = printQueue.then(work);
+  printQueue = job.catch(() => {});
+  return job;
+}
+
+// Checks the printer for real; connect() also gives a fresh printer object
+function checkPrinter() {
+  return inQueue(async () => (printerConnected = await printer.connect()));
+}
+
+// Connects on demand, so a printer that was off at startup or went away recovers.
+// Resolves to false when the printer can't be reached.
+function queuePrint(...ticketArgs) {
+  return inQueue(async () => {
+    if (!printerConnected) printerConnected = await printer.connect();
+    if (!printerConnected) return false;
+    try {
+      await printer.printTicket(...ticketArgs);
+      return true;
+    } catch (error) {
+      printerConnected = false;
+      throw error;
+    }
+  });
+}
+
+const MAX_TITLE_LENGTH = 120;
+const MAX_TEXT_LENGTH = 800;
+
+// Returns an error message for invalid ticket text, or null when it is fine
+function textError(title, ...texts) {
+  if (!title || typeof title !== "string" || title.trim() === "") {
+    return "Title is required and must be a non-empty string";
+  }
+  if (title.trim().length > MAX_TITLE_LENGTH) {
+    return `Title must be at most ${MAX_TITLE_LENGTH} characters`;
+  }
+  if (texts.some((text) => text && String(text).trim().length > MAX_TEXT_LENGTH)) {
+    return `Other fields must be at most ${MAX_TEXT_LENGTH} characters`;
+  }
+  return null;
+}
+
 // Start server first, then connect to printer
-app.listen(port, async () => {
+if (require.main === module) app.listen(port, () => {
   console.log(
     `📋 Todo Ticket Printer Server running on http://localhost:${port}`
   );
   console.log(`📄 Visit http://localhost:${port} for API documentation`);
 
-  // Connect to printer after server starts
+  // Connect to printer after server starts, in the queue so no print runs meanwhile
   console.log("🔌 Connecting to printer...");
-  printerConnected = await printer.connect();
-
-  if (printerConnected) {
-    console.log("🖨️  Printer status: Connected ✅");
-  } else {
-    console.log("🖨️  Printer status: Not connected ❌");
-    console.log(
-      "    Make sure the printer is powered on and connected via USB or network"
-    );
-  }
+  checkPrinter().then((connected) => {
+    if (connected) {
+      console.log("🖨️  Printer status: Connected ✅");
+    } else {
+      console.log("🖨️  Printer status: Not connected ❌");
+      console.log(
+        "    Make sure the printer is powered on and connected via USB or network"
+      );
+    }
+  });
 });
 
 // Health check endpoint
-app.get("/health", (req, res) => {
+app.get("/health", async (req, res) => {
   res.json({
     status: "ok",
-    printer: printerConnected ? "connected" : "disconnected",
+    printer: (await checkPrinter()) ? "connected" : "disconnected",
     timestamp: new Date().toISOString(),
   });
 });
@@ -306,27 +342,24 @@ app.get("/health", (req, res) => {
 // Print todo ticket endpoint
 app.post("/print-todo", async (req, res) => {
   try {
-    const { title, assignee, description } = req.body;
+    const { title, assignee, description } = req.body ?? {};
 
-    // Validate required fields
-    if (!title || typeof title !== "string" || title.trim() === "") {
-      return res.status(400).json({
-        error: "Title is required and must be a non-empty string",
-      });
-    }
-
-    if (!printerConnected) {
-      return res.status(503).json({
-        error: "Printer is not connected",
-      });
+    const error = textError(title, assignee, description);
+    if (error) {
+      return res.status(400).json({ error });
     }
 
     // Print the ticket
-    await printer.printTodoTicket(
+    const printed = await queuePrint(
       title.trim(),
       assignee ? String(assignee).trim() : null,
       description ? String(description).trim() : null
     );
+    if (!printed) {
+      return res.status(503).json({
+        error: "Printer is not connected",
+      });
+    }
 
     res.json({
       success: true,
@@ -347,10 +380,99 @@ app.post("/print-todo", async (req, res) => {
   }
 });
 
+// Message printing, intended for automated clients (AI agents, hooks, scripts)
+const MESSAGE_KINDS = { note: "NOTE", alert: "ALERT", done: "DONE" };
+const MESSAGE_RATE_LIMIT = parseInt(process.env.MESSAGE_RATE_LIMIT || "10", 10); // per hour
+const PRINT_API_TOKEN = process.env.PRINT_API_TOKEN;
+const recentMessageTimes = [];
+
+function requireToken(req, res, next) {
+  if (!PRINT_API_TOKEN) {
+    return res.status(503).json({
+      error: "PRINT_API_TOKEN is not configured on the server",
+    });
+  }
+  const provided = Buffer.from(req.get("Authorization") || "");
+  const expected = Buffer.from(`Bearer ${PRINT_API_TOKEN}`);
+  if (
+    provided.length !== expected.length ||
+    !crypto.timingSafeEqual(provided, expected)
+  ) {
+    return res.status(401).json({ error: "Invalid or missing bearer token" });
+  }
+  next();
+}
+
+app.post("/print-message", requireToken, async (req, res) => {
+  try {
+    const { kind = "note", title, body, source } = req.body ?? {};
+
+    if (!MESSAGE_KINDS[kind]) {
+      return res.status(400).json({
+        error: `kind must be one of: ${Object.keys(MESSAGE_KINDS).join(", ")}`,
+      });
+    }
+    const error = textError(title, body, source);
+    if (error) {
+      return res.status(400).json({ error });
+    }
+
+    const hourAgo = Date.now() - 60 * 60 * 1000;
+    while (recentMessageTimes.length && recentMessageTimes[0] < hourAgo) {
+      recentMessageTimes.shift();
+    }
+    if (recentMessageTimes.length >= MESSAGE_RATE_LIMIT) {
+      return res.status(429).json({
+        error: `Rate limit reached (${MESSAGE_RATE_LIMIT} messages per hour)`,
+      });
+    }
+
+    // Count the message before printing so parallel requests can't exceed the limit,
+    // and give the slot back if nothing was printed
+    const sentAt = Date.now();
+    recentMessageTimes.push(sentAt);
+    const giveBackSlot = () =>
+      recentMessageTimes.splice(recentMessageTimes.indexOf(sentAt), 1);
+    const printed = await queuePrint(
+      title.trim(),
+      source ? String(source).trim() : null,
+      body ? String(body).trim() : null,
+      { label: MESSAGE_KINDS[kind], ownerLabel: "FROM" }
+    ).catch((error) => {
+      giveBackSlot();
+      throw error;
+    });
+    if (!printed) {
+      giveBackSlot();
+      return res.status(503).json({
+        error: "Printer is not connected",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Message printed successfully",
+      printed: {
+        kind,
+        title: title.trim(),
+        source: source ? String(source).trim() : null,
+        body: body ? String(body).trim() : null,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Print error:", error);
+    res.status(500).json({
+      error: "Failed to print message",
+      details: error.message,
+    });
+  }
+});
+
 // Get printer status
-app.get("/printer-status", (req, res) => {
+app.get("/printer-status", async (req, res) => {
   const status = {
-    connected: printerConnected,
+    connected: await checkPrinter(),
     type: PRINTER_TYPE,
     mode: useNetworkPrinter ? "network" : "usb",
   };
@@ -381,6 +503,8 @@ app.get("/", (req, res) => {
       "GET /health": "Health check",
       "GET /printer-status": "Printer connection status",
       "POST /print-todo": "Print a todo ticket",
+      "POST /print-message":
+        "Print a note/alert/done message (requires bearer token)",
     },
     usage: {
       "POST /print-todo": {
@@ -388,6 +512,15 @@ app.get("/", (req, res) => {
           title: "string (required) - The main task title",
           assignee: "string (optional) - Person assigned to the task",
           description: "string (optional) - Additional task details",
+        },
+      },
+      "POST /print-message": {
+        headers: { Authorization: "Bearer <PRINT_API_TOKEN>" },
+        body: {
+          kind: "string (optional) - note (default), alert or done",
+          title: `string (required) - Headline, max ${MAX_TITLE_LENGTH} chars`,
+          body: `string (optional) - Message text, max ${MAX_TEXT_LENGTH} chars`,
+          source: "string (optional) - Who sent it, e.g. Claude Code",
         },
       },
     },
@@ -400,15 +533,4 @@ app.get("/", (req, res) => {
   });
 });
 
-// Graceful shutdown
-process.on("SIGINT", () => {
-  console.log("\n👋 Shutting down server...");
-  printer.disconnect();
-  process.exit(0);
-});
-
-process.on("SIGTERM", () => {
-  console.log("\n👋 Shutting down server...");
-  printer.disconnect();
-  process.exit(0);
-});
+module.exports = app;

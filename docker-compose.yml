@@ -10,6 +10,8 @@ services:
       - PRINTER_TYPE=${PRINTER_TYPE}
       - PRINTER_NETWORK_IP=${PRINTER_NETWORK_IP}
       - PRINTER_NETWORK_PORT=${PRINTER_NETWORK_PORT:-9100}
+      - PRINT_API_TOKEN=${PRINT_API_TOKEN}
+      - MESSAGE_RATE_LIMIT=${MESSAGE_RATE_LIMIT:-10}
       - NODE_ENV=production
     privileged: true # For USB device access
     volumes:

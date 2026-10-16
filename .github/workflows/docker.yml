@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 env:
-  REGISTRY: docker.io
+  REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -21,19 +21,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # run the tests before building the image
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
       # multi-arch needs QEMU emulation
       - uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
 
       # only push for non-PR events
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # canonical tag & label set
       - name: Extract Docker metadata

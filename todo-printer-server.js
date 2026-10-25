@@ -170,9 +170,8 @@ class TodoPrinter {
       this.printer.setTextNormal();
       this.printer.newLine();
 
-      // Assignee section with highlight
+      // Assignee section with highlight, at normal size like the notes
       if (assignee && assignee.trim()) {
-        this.printer.setTextSize(1, 1);
         this.printer.bold(true);
         this.printer.print(`${ownerLabel}: `);
         this.printer.bold(false);
@@ -189,7 +188,7 @@ class TodoPrinter {
         this.printer.bold(false);
 
         // Indent and wrap description
-        const wrappedDesc = this.wrapText(description.trim(), 22); // 24 chars minus "> " prefix
+        const wrappedDesc = this.wrapText(description.trim(), 46); // 48 columns at normal size, minus "> " prefix
         wrappedDesc.split("\n").forEach((line) => {
           this.printer.println(`> ${line}`);
         });
@@ -383,23 +382,46 @@ app.post("/print-todo", async (req, res) => {
 // Message printing, intended for automated clients (AI agents, hooks, scripts)
 const MESSAGE_KINDS = { note: "NOTE", alert: "ALERT", done: "DONE" };
 const MESSAGE_RATE_LIMIT = parseInt(process.env.MESSAGE_RATE_LIMIT || "10", 10); // per hour
-const PRINT_API_TOKEN = process.env.PRINT_API_TOKEN;
+// Named tokens, one per group of machines (PRINT_API_TOKENS=home:abc,external:def),
+// so a group can be cut off without touching the others. A single PRINT_API_TOKEN
+// still works and is named "default".
+const API_TOKENS = (process.env.PRINT_API_TOKENS || "")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean)
+  .map((entry) => {
+    const separator = entry.indexOf(":");
+    const name = entry.slice(0, separator).trim();
+    const token = entry.slice(separator + 1).trim();
+    if (separator < 1 || !token) {
+      throw new Error(`PRINT_API_TOKENS entries must look like name:token, got "${entry}"`);
+    }
+    return { name, expected: Buffer.from(`Bearer ${token}`) };
+  });
+if (process.env.PRINT_API_TOKEN) {
+  API_TOKENS.push({
+    name: "default",
+    expected: Buffer.from(`Bearer ${process.env.PRINT_API_TOKEN}`),
+  });
+}
 const recentMessageTimes = [];
 
 function requireToken(req, res, next) {
-  if (!PRINT_API_TOKEN) {
+  if (API_TOKENS.length === 0) {
     return res.status(503).json({
-      error: "PRINT_API_TOKEN is not configured on the server",
+      error: "No API tokens are configured on the server (PRINT_API_TOKENS)",
     });
   }
   const provided = Buffer.from(req.get("Authorization") || "");
-  const expected = Buffer.from(`Bearer ${PRINT_API_TOKEN}`);
-  if (
-    provided.length !== expected.length ||
-    !crypto.timingSafeEqual(provided, expected)
-  ) {
+  const match = API_TOKENS.find(
+    ({ expected }) =>
+      provided.length === expected.length &&
+      crypto.timingSafeEqual(provided, expected)
+  );
+  if (!match) {
     return res.status(401).json({ error: "Invalid or missing bearer token" });
   }
+  req.tokenName = match.name;
   next();
 }
 
@@ -433,9 +455,11 @@ app.post("/print-message", requireToken, async (req, res) => {
     recentMessageTimes.push(sentAt);
     const giveBackSlot = () =>
       recentMessageTimes.splice(recentMessageTimes.indexOf(sentAt), 1);
+    // The token's group is printed with the sender, since clients pick their own source
+    const from = source ? `${String(source).trim()} (${req.tokenName})` : req.tokenName;
     const printed = await queuePrint(
       title.trim(),
-      source ? String(source).trim() : null,
+      from,
       body ? String(body).trim() : null,
       { label: MESSAGE_KINDS[kind], ownerLabel: "FROM" }
     ).catch((error) => {
@@ -455,7 +479,7 @@ app.post("/print-message", requireToken, async (req, res) => {
       printed: {
         kind,
         title: title.trim(),
-        source: source ? String(source).trim() : null,
+        from,
         body: body ? String(body).trim() : null,
         timestamp: new Date().toISOString(),
       },
@@ -515,7 +539,7 @@ app.get("/", (req, res) => {
         },
       },
       "POST /print-message": {
-        headers: { Authorization: "Bearer <PRINT_API_TOKEN>" },
+        headers: { Authorization: "Bearer <token from PRINT_API_TOKENS>" },
         body: {
           kind: "string (optional) - note (default), alert or done",
           title: `string (required) - Headline, max ${MAX_TITLE_LENGTH} chars`,

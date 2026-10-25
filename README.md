@@ -122,12 +122,12 @@ Print a TODO ticket. Requests must be JSON (`Content-Type: application/json`). T
 
 Print a short message for automated clients (AI agents, hooks, scripts). The header shows `NOTE`, `ALERT` or `DONE` instead of `TODO`.
 
-Requires `Authorization: Bearer <PRINT_API_TOKEN>`. Same length limits as `/print-todo`, and the server prints at most `MESSAGE_RATE_LIMIT` messages per hour (default 10).
+Requires `Authorization: Bearer <token>` with one of the tokens in `PRINT_API_TOKENS`. The token's name is printed next to the sender, e.g. `FROM: Claude Code (home)`. Same length limits as `/print-todo`, and the server prints at most `MESSAGE_RATE_LIMIT` messages per hour (default 10).
 
 ```bash
 curl -X POST http://localhost:3000/print-message \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $PRINT_API_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{
     "kind": "alert",
     "title": "Need your input",
@@ -179,7 +179,8 @@ Each ticket header shows a random `.png`/`.jpg` from the `logos/` directory, sca
 
 #### Message API
 
-- `PRINT_API_TOKEN`: Bearer token required by `POST /print-message` (the endpoint is disabled when unset). Generate one with `openssl rand -hex 32`
+- `PRINT_API_TOKENS`: Named bearer tokens accepted by `POST /print-message`, one per group of machines, e.g. `home:abc123,external:def456`. Generate each with `openssl rand -hex 32`. To cut off a group, remove its entry and restart the server. The endpoint is disabled when no token is set
+- `PRINT_API_TOKEN`: Older single-token setting, still accepted under the name `default`
 - `MESSAGE_RATE_LIMIT`: Maximum messages printed per hour (default: 10)
 
 ## Examples
